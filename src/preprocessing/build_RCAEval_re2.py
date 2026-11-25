@@ -1,22 +1,23 @@
 """
-RE2 -> SMD 格式转换器
+RE2 -> SMD format converter / RE2 -> SMD 格式转换器
 
-产出结构:
+Output structure / 产出结构:
     out/RE2-OB/
-        feature_names.json          全局固定列空间, 顺序即数组列序
-        config_dump.json            本次转换的全部参数
-        manifest.csv                90 个案例的清单, 含分组与实际长度
-        report_columns.txt          列空间与数据的差异报告, 需人工过目
+        feature_names.json          Global fixed feature space; array column order / 全局固定列空间, 顺序即数组列序
+        config_dump.json            All parameters for this conversion / 本次转换的全部参数
+        manifest.csv                Manifest of 90 cases, including group and actual lengths / 90 个案例的清单, 含分组与实际长度
+        report_columns.txt          Report of differences between feature space and data; review manually / 列空间与数据的差异报告, 需人工过目
         cases/adservice_cpu_1/
-            train.npy               (FIT_LEN, D)      注入前早段, 无标签
-            test.npy                (N_test, D)       注入前晚段 + 注入后
-            test_label.npy          (N_test,)         0 正常 1 异常
-            meta.json               根因服务/根因指标/inject_time/切分索引
+            train.npy               (FIT_LEN, D)      Early pre-injection segment, unlabeled / 注入前早段, 无标签
+            test.npy                (N_test, D)       Late pre-injection segment + post-injection segment / 注入前晚段 + 注入后
+            test_label.npy          (N_test,)         0 normal, 1 anomalous / 0 正常 1 异常
+            meta.json               Root-cause service/metric/inject_time/split indices / 根因服务/根因指标/inject_time/切分索引
 
-切分为不重叠设计: train 与 test 的正常部分没有交集, 避免在训练数据上测 FPR
+Non-overlapping split: train and the normal portion of test do not overlap, avoiding FPR evaluation on training data / 切分为不重叠设计: train 与 test 的正常部分没有交集, 避免在训练数据上测 FPR
 
-池化协议用法:
+Example usage for the pooled protocol / 池化协议用法:
     np.vstack([np.load(f"cases/{c}/train.npy") for c in 训练组案例])
+    # Cases in the training group / 训练组案例
 """
 
 import glob
@@ -32,31 +33,31 @@ import pandas as pd
 ROOT = r"D:\projects\X-RCA\Dataset\RCAEval_ds\RE2-OB"
 OUTDIR = r"D:\projects\X-RCA\Dataset\RCAEval_ds\RE2-OB_preprocessed"
 
-FIT_LEN = 480        # train: 注入前最早的 480 行
-TEST_NORMAL = 240    # test 正常部分: 紧邻注入时刻之前的 240 行
-TEST_ANOMALY = 600   # test 异常部分: 注入后最多 600 行
+FIT_LEN = 480        # train: earliest 480 pre-injection rows / 注入前最早的 480 行
+TEST_NORMAL = 240    # normal test segment: 240 rows immediately before injection / test 正常部分: 紧邻注入时刻之前的 240 行
+TEST_ANOMALY = 600   # anomalous test segment: up to 600 post-injection rows / test 异常部分: 注入后最多 600 行
 
 METRIC_FAMILIES = ["cpu", "mem", "diskio", "socket", "latency", "error", "workload"]
 
 PRUNE_NEVER_OBSERVED = True
 
-# 应用服务白名单, 依据被测系统的服务清单规则化定义, 与案例数据无关
+# Application-service whitelist, defined from the system's service inventory rather than case data / 应用服务白名单, 依据被测系统的服务清单规则化定义, 与案例数据无关
 SERVICE_WHITELIST = {
     "RE2-OB": [
         "adservice", "cartservice", "checkoutservice", "currencyservice",
         "emailservice", "frontend", "paymentservice", "productcatalogservice",
         "recommendationservice", "shippingservice", "redis",
     ],
-    # SS 与 TT 未定义时走自动推导 + 黑名单
+    # If SS and TT are undefined, infer automatically and apply the blacklist / SS 与 TT 未定义时走自动推导 + 黑名单
 }
 
-# 服务网格与基础设施组件, 不是应用服务, 不可能是根因
+# Service-mesh and infrastructure components; not application services and cannot be root causes / 服务网格与基础设施组件, 不是应用服务, 不可能是根因
 INFRA_BLACKLIST_SUBSTR = [
     "istio", "passthrough", "PassthroughCluster", "InboundPassthrough",
     "frontend-check", "frontend-external", "unknown", "BlackHole",
 ]
 
-# 故障类型 -> ground truth 指标族, 与 RCAEval main.py 一致
+# Fault type -> ground-truth metric family, consistent with RCAEval main.py / 故障类型 -> ground truth 指标族, 与 RCAEval main.py 一致
 FAULT_TO_FAMILY = {
     "cpu": "cpu", "mem": "mem", "disk": "diskio",
     "socket": "socket", "delay": "latency", "loss": "latency",
@@ -66,7 +67,7 @@ FAULT_TO_FAMILY = {
 
 
 def clean_columns(cols):
-    """丢掉 latency-50, 把 latency-90 改名为 latency, 与官方预处理一致"""
+    """Drop latency-50 and rename latency-90 to latency, following the official preprocessing / 丢掉 latency-50, 把 latency-90 改名为 latency, 与官方预处理一致"""
     out = []
     for c in cols:
         if c.endswith("_latency-50"):
@@ -76,7 +77,7 @@ def clean_columns(cols):
 
 
 def split_col(c):
-    """列名拆成 (服务, 指标族). 服务名可含连字符, 分隔符是最后一个下划线"""
+    """Split a column name into (service, metric family). Service names may contain hyphens; the final underscore is the separator / 列名拆成 (服务, 指标族). 服务名可含连字符, 分隔符是最后一个下划线"""
     if "_" not in c:
         return None, None
     svc, fam = c.rsplit("_", 1)
@@ -89,7 +90,7 @@ def is_infra(svc):
 
 
 def scan_all_columns(paths):
-    """扫一遍全部案例的列名, 只用于生成差异报告和自动推导服务清单"""
+    """Scan column names across all cases, only for the difference report and automatic service-list inference / 扫一遍全部案例的列名, 只用于生成差异报告和自动推导服务清单"""
     seen = Counter()
     for p in paths:
         for c in clean_columns(pd.read_csv(p, nrows=0).columns):
@@ -98,7 +99,7 @@ def scan_all_columns(paths):
 
 
 def build_feature_space(system, seen):
-    """规则化定义列空间: 服务白名单 x 指标族 的笛卡尔积"""
+    """Define the feature space systematically as the Cartesian product of the service whitelist and metric families / 规则化定义列空间: 服务白名单 x 指标族 的笛卡尔积"""
     if system in SERVICE_WHITELIST:
         services = list(SERVICE_WHITELIST[system])
         source = "配置白名单"
@@ -119,7 +120,7 @@ def build_feature_space(system, seen):
 
 
 def write_column_report(path, system, services, features, source, seen):
-    """把列空间与数据的差异写成报告, 需人工过目确认没有误删"""
+    """Write a report of differences between the feature space and data; manually review it to ensure nothing was removed incorrectly / 把列空间与数据的差异写成报告, 需人工过目确认没有误删"""
     in_data = set(seen) - {"time"}
     in_space = set(features)
 
@@ -165,7 +166,7 @@ def write_column_report(path, system, services, features, source, seen):
 
 
 def load_case(path, features):
-    """读一个案例, 对齐到固定列空间, 返回 (time, X) 与坏行数"""
+    """Load one case, align it to the fixed feature space, and return (time, X) plus the number of invalid rows / 读一个案例, 对齐到固定列空间, 返回 (time, X) 与坏行数"""
     df = pd.read_csv(path)
     df = df.loc[:, ~df.columns.str.endswith("_latency-50")]
     df = df.rename(columns={c: c.replace("_latency-90", "_latency")
@@ -176,11 +177,11 @@ def load_case(path, features):
     df = df.loc[np.isfinite(t.to_numpy(dtype="float64", na_value=np.nan))].copy()
     time = df["time"].astype("int64").to_numpy()
 
-    # 数值化, inf 转 nan, 前向填充, 剩余填 0
+    # Convert to numeric, replace inf with NaN, forward-fill, then fill remaining values with 0 / 数值化, inf 转 nan, 前向填充, 剩余填 0
     vals = df.drop(columns=["time"]).apply(pd.to_numeric, errors="coerce")
     vals = vals.replace([np.inf, -np.inf], np.nan).ffill().fillna(0.0)
 
-    # 对齐固定列空间: 缺列填 0, 多余列丢弃, 顺序固定
+    # Align to the fixed feature space: fill missing columns with 0, drop extras, and fix the order / 对齐固定列空间: 缺列填 0, 多余列丢弃, 顺序固定
     X = vals.reindex(columns=features).fillna(0.0).to_numpy(dtype="float32")
     return time, X, bad
 
@@ -224,7 +225,7 @@ def convert(system=None):
         n_pre = int(pre_mask.sum())
         X_pre, X_post = X[pre_mask], X[~pre_mask]
 
-        # 不重叠切分
+        # Non-overlapping split / 不重叠切分
         need = FIT_LEN + TEST_NORMAL
         if n_pre < need:
             print(f"[跳过] {case_id}: 注入前只有 {n_pre} 行, 需要 {need} 行")
@@ -232,9 +233,9 @@ def convert(system=None):
                              status="skipped_short_pre", n_pre=n_pre))
             continue
 
-        train = X_pre[:FIT_LEN]                       # 最早的一段
-        test_n = X_pre[n_pre - TEST_NORMAL:]          # 紧邻注入之前
-        test_a = X_post[:TEST_ANOMALY]                # 注入之后
+        train = X_pre[:FIT_LEN]                       # Earliest segment / 最早的一段
+        test_n = X_pre[n_pre - TEST_NORMAL:]          # Immediately before injection / 紧邻注入之前
+        test_a = X_post[:TEST_ANOMALY]                # After injection / 注入之后
 
         test = np.vstack([test_n, test_a])
         test_time = np.concatenate([time[pre_mask][n_pre - TEST_NORMAL:],
@@ -275,7 +276,7 @@ def convert(system=None):
         rows.append(row)
 
     man = pd.DataFrame(rows)
-    # 留一服务分组: 以注入服务为折, 同服务的全部案例同折
+    # Leave-one-service grouping: use the injected service as the fold; all cases for that service share a fold / 留一服务分组: 以注入服务为折, 同服务的全部案例同折
     man["fold"] = man["service"].astype("category").cat.codes
     man.to_csv(os.path.join(OUTDIR, "manifest.csv"), index=False)
 
