@@ -1,21 +1,34 @@
 """
 算法选择表, RE2-OB, 一次跑齐
+Algorithm selection table for RE2-OB; run all candidates in one pass.
 ==============================================
 一张表定算法. 每个候选算出:
+Select the algorithm from one table. For each candidate, compute:
   检测质量:   AUC-ROC, AUC-PR
+  Detection quality: AUC-ROC and AUC-PR.
   归因质量:   AC@1_fine, AC@5_fine   (归因排序命中根因指标)
+  Attribution quality: AC@1_fine and AC@5_fine (whether the attribution ranking hits the root-cause metric).
   归因成本:   Explain/s 每条 SHAP 耗时
+  Attribution cost: Explain/s, the SHAP time per observation.
   XAI 兼容性: TreeSHAP 精确 / KernelSHAP 近似
+  XAI compatibility: exact TreeSHAP / approximate KernelSHAP.
 
 判据: 检测饱和使 AUC 区分度低, 决定权在归因质量 AC@1_fine.
+Decision rule: detection is near saturation, so AUC has limited discriminative power; attribution quality, AC@1_fine, carries the deciding weight.
      iForest 虽 TreeSHAP 精确但归因差, PCC 虽 KernelSHAP 近似但归因优.
+     Although iForest uses exact TreeSHAP, its attribution is weak; PCC uses approximate KernelSHAP but has better attribution.
 
 阈值固定 Q=0.99, 因本表列均不依赖 q:
+Threshold fixed at Q=0.99, as the columns in this table do not depend on q:
   AUC / AC@k / 耗时 都是免阈值或排序类指标.
+  AUC, AC@k, and runtime are threshold-independent or ranking-based metrics.
 
 输出
+Outputs:
     algo_select/table_his.csv        论文用的主表
+    algo_select/table_his.csv        Main table for the paper.
     algo_select/per_case_his.csv     每案例每算法明细
+    algo_select/per_case_his.csv     Per-case details for each algorithm.
 """
 
 import json
@@ -45,20 +58,22 @@ DATA = r"D:\projects\X-RCA\Dataset\RCAEval_ds\RE2-OB_preprocessed"
 OUT = os.path.join(DATA, "algo_select_q999_e15")
 
 Q = 0.999
-MAX_EXPLAIN = 15       # 每案例解释的点数, 控制 KernelSHAP 成本
+MAX_EXPLAIN = 15       # 每案例解释的点数, 控制 KernelSHAP 成本 / Number of observations explained per case; limits KernelSHAP cost.
 KERNEL_BG = 50
 K_MAX = 5
 SEED = 42
-N_CASES = None         # 调试设 6
+N_CASES = None         # 调试设 6 / Set to 6 for debugging.
 
 AC_METRIC_FAMILIES = {"cpu", "latency", "diskio", "mem", "socket"}
 
 # 算法注册: 名字 -> (构造, 类型, SHAP 方式, XAI 兼容)
+# Algorithm registry: name -> (constructor, type, SHAP method, XAI compatibility).
 def registry():
     return {
         "iForest": (lambda: IsolationForest(n_estimators=100, max_samples=256,
                     random_state=SEED, n_jobs=-1), "Trees", "TreeSHAP", "Exact", "tree"),
         # "EIF": (lambda: IsolationForest(n_estimators=100, max_samples=256,
+        # EIF candidate definition (currently commented out):
         #         max_features=0.8, random_state=SEED, n_jobs=-1),
         #         "Trees", "TreeSHAP", "Exact", "tree"),
         "LOF": (lambda: LocalOutlierFactor(n_neighbors=20, novelty=True, n_jobs=-1),
@@ -170,6 +185,7 @@ def eval_case(cid, row, features):
             cols = [features[i] for i in order]
             coarse = dedup([c.split("_")[0].replace("-db", "") for c in cols])
             # Match Layer 2's metric candidate list and exact-name hit rule.
+            # 与 Layer 2 的指标候选列表和精确名称命中规则保持一致。
             fine = [c for c in cols
                     if c.rsplit("_", 1)[-1] in AC_METRIC_FAMILIES]
 
@@ -198,7 +214,7 @@ def run():
         man = man.head(N_CASES)
     features = json.load(open(os.path.join(DATA, "feature_names.json")))
 
-    print(f"案例 {len(man)}, 算法 8 个")
+    print(f"案例 {len(man)}, 算法 7 个")
     rows = []
     for i, r in man.iterrows():
         rows += eval_case(r.case_id, r, features)
