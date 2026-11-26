@@ -43,24 +43,6 @@ import os
 import random
 
 
-def _fidelity_str(fidelity: float) -> str:
-    if fidelity is None:
-        return "N/A"
-    if fidelity >= 0.8:
-        return f"High (Fidelity: {fidelity:.4f}) -> Strong evidence"
-    if fidelity >= 0.5:
-        return f"Medium (Fidelity: {fidelity:.4f}) -> Moderate evidence"
-    return f"Low (Fidelity: {fidelity:.4f}) -> Evidence is weak"
-
-
-def _xai_gateway_suggestion(fidelity: float, n_points: int) -> str:
-    if fidelity is not None and fidelity >= 0.8 and n_points >= 10:
-        return "Escalate: High-Confidence Anomaly"
-    if fidelity is not None and fidelity >= 0.5:
-        return "Monitor: Moderate-Confidence Anomaly"
-    return "Suppress LLM Report"
-
-
 def _split_name(name: str) -> Tuple[str, str]:
     """"checkoutservice_cpu" -> ("checkoutservice", "cpu")"""
     if "_" in name:
@@ -68,18 +50,6 @@ def _split_name(name: str) -> Tuple[str, str]:
     else:
         service, metric_type = name, "unknown"
     return service, metric_type
-
-
-def _dedup_services(names: List[str]) -> List[str]:
-    """从一串 metric 名称里按出现顺序去重取出 service 名"""
-    seen = set()
-    out = []
-    for n in names:
-        service, _ = _split_name(n)
-        if service not in seen:
-            seen.add(service)
-            out.append(service)
-    return out
 
 
 def _ranked_candidates(pairs: List[Tuple[float, str]], top_k: int, directions: Dict[str, str] = None,
@@ -113,10 +83,6 @@ def _ranked_candidates(pairs: List[Tuple[float, str]], top_k: int, directions: D
     return out
 
 
-def _is_new_format(l2_output: Dict) -> bool:
-    return "service_list" in l2_output or "metrics_list" in l2_output
-
-
 def convert_l2_to_xai_report(l2_output: Dict, candidate_pool_size: int = 10,
                               query_chain_size: int = 5) -> Dict:
     """
@@ -131,24 +97,8 @@ def convert_l2_to_xai_report(l2_output: Dict, candidate_pool_size: int = 10,
     fidelity = l2_output.get("attribution_fidelity")
     n_points = l2_output.get("n_explained_points", 0)
 
-    service_list = l2_output.get("service_list", [])
     metrics_list = l2_output.get("metrics_list", [])
 
-    # positive_metrics = [m for m in metrics_list if m.get("shap", 0) > 0]
-    # sorted_metrics = sorted(positive_metrics, key=lambda x: x["shap"], reverse=True)
-    # pairs = [(m["shap"], m["name"]) for m in sorted_metrics]
-    # directions = {m["name"]: m.get("direction", "unknown") for m in sorted_metrics}
-    #
-    # metric_chain = [name for _, name in pairs[:query_chain_size]]
-    # service_chain = [item["service"] for item in service_list[:query_chain_size]] \
-    #     or _dedup_services(metric_chain)
-    #
-    # top_service = service_list[0] if service_list else {}
-    # model_score = top_service.get("service_shap", 0.0)
-    #
-    # metric_details = {m["name"]: m for m in sorted_metrics}
-    #
-    # l2_candidates = _ranked_candidates(pairs, candidate_pool_size, directions, metric_details)
     all_metrics = [m for m in metrics_list if m.get("name")]
 
     shap_ranked = sorted(all_metrics, key=lambda m: float(m.get("shap", 0)), reverse=True,)
@@ -166,7 +116,6 @@ def convert_l2_to_xai_report(l2_output: Dict, candidate_pool_size: int = 10,
         "case_id": meta.get("case_id", "unknown"),
         "xai_analysis": {
             "metric_chain": metric_chain,  # 检索使用
-            "fidelity_assessment": _fidelity_str(fidelity),  # prompt 使用
         },
         "l2_candidates": l2_candidates,  # prompt 中的候选证据
         "ground_truth_meta": {
@@ -178,35 +127,3 @@ def convert_l2_to_xai_report(l2_output: Dict, candidate_pool_size: int = 10,
         "n_explained_points": n_points,
         "attribution_fidelity": fidelity,
     }
-
-
-def load_l2_input(path: str, candidate_pool_size: int = 10,
-                   query_chain_size: int = 5) -> List[Dict]:
-    """
-    统一入口: path 既可以是单个 L2 json 文件,也可以是一个目录 (内含多个 case json)。
-    取代原来 "l2 模式单独读单文件 + batch 模式单独读目录" 两套重复代码 ——
-    上层 rag_llm_layer.py 不用再关心是单条还是批量,统一拿到一个 List[Dict],
-    单条诊断只是 n=1 的批量诊断。
-    """
-    if os.path.isdir(path):
-        paths = [os.path.join(path, f) for f in sorted(os.listdir(path)) if f.endswith(".json")]
-    elif os.path.isfile(path):
-        paths = [path]
-    else:
-        raise FileNotFoundError(f"{path} 不是一个有效的文件或目录")
-
-    reports = []
-    for p in paths:
-        with open(p, "r", encoding="utf-8") as f:
-            l2_output = json.load(f)
-        reports.append(convert_l2_to_xai_report(
-            l2_output,
-            candidate_pool_size=candidate_pool_size,
-            query_chain_size=query_chain_size,
-        ))
-
-    if not reports:
-        print(f"  ⚠️  {path} 下没有找到任何 .json 文件")
-    else:
-        print(f"  从 {path} 加载了 {len(reports)} 条 L2 case")
-    return reports
